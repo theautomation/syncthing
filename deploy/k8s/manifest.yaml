@@ -1,0 +1,201 @@
+---
+kind: PersistentVolume
+apiVersion: v1
+metadata:
+  name: pv-nfs-syncthing-config
+spec:
+  storageClassName: "freenas-nfs-manual-csi"
+  capacity:
+    storage: 5Gi
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  mountOptions:
+    - nfsvers=4
+    - nolock
+    - noatime
+  csi:
+    driver: org.democratic-csi.node-manual
+    readOnly: false
+    fsType: nfs
+    volumeHandle: pv-nfs-syncthing-config
+    volumeAttributes:
+      server: storage-server-lagg.lan
+      share: /mnt/r01_1tb/k8s/syncthing-config
+      node_attach_driver: nfs
+      provisioner_driver: node-manual
+
+---
+kind: PersistentVolume
+apiVersion: v1
+metadata:
+  name: pv-nfs-syncthing-data
+spec:
+  storageClassName: "freenas-nfs-manual-csi"
+  capacity:
+    storage: 600Gi
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  mountOptions:
+    - nfsvers=4
+    - nolock
+    - noatime
+  csi:
+    driver: org.democratic-csi.node-manual
+    readOnly: false
+    fsType: nfs
+    volumeHandle: pv-nfs-syncthing-data
+    volumeAttributes:
+      server: storage-server-lagg.lan
+      share: /mnt/r10_8tb/coen
+      node_attach_driver: nfs
+      provisioner_driver: node-manual
+
+---
+kind: PersistentVolumeClaim
+apiVersion: v1
+metadata:
+  name: pvc-nfs-syncthing-config
+  namespace: tools
+  annotations:
+    volume.beta.kubernetes.io/storage-class: "freenas-nfs-manual-csi"
+spec:
+  storageClassName: freenas-nfs-manual-csi
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 5Gi
+  volumeName: pv-nfs-syncthing-config
+
+---
+kind: PersistentVolumeClaim
+apiVersion: v1
+metadata:
+  name: pvc-nfs-syncthing-data
+  namespace: tools
+  annotations:
+    volume.beta.kubernetes.io/storage-class: "freenas-nfs-manual-csi"
+spec:
+  storageClassName: freenas-nfs-manual-csi
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 600Gi
+  volumeName: pv-nfs-syncthing-data
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: syncthing
+  namespace: tools
+  labels:
+    app: syncthing
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: syncthing
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: syncthing
+    spec:
+      securityContext:
+        fsGroup: 1000
+      containers:
+        - image: "harbor.k8s.lan/dockerhub-proxy/syncthing/syncthing:1"
+          securityContext:
+            runAsUser: 1000
+          name: syncthing
+          resources:
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
+          ports:
+            - containerPort: 8384
+              protocol: TCP
+              name: web-ui
+            - containerPort: 22000
+              protocol: TCP
+              name: tcp-transfers
+            - containerPort: 22000
+              protocol: UDP
+              name: quic-transfers
+            - containerPort: 21027
+              protocol: UDP
+              name: discovery
+          env:
+            - name: PUID
+              value: "1000"
+            - name: PGID
+              value: "1000"
+          volumeMounts:
+            - name: syncthing-config
+              mountPath: /var/syncthing
+            - name: syncthing-data
+              mountPath: /data
+      volumes:
+        - name: syncthing-config
+          persistentVolumeClaim:
+            claimName: pvc-nfs-syncthing-config
+        - name: syncthing-data
+          persistentVolumeClaim:
+            claimName: pvc-nfs-syncthing-data
+
+---
+kind: Service
+apiVersion: v1
+metadata:
+  name: syncthing
+  namespace: tools
+  labels:
+    app: syncthing
+spec:
+  selector:
+    app: syncthing
+  type: ClusterIP
+  ports:
+    - name: web-ui
+      protocol: TCP
+      port: 8384
+      targetPort: 8384
+    - name: tcp-transfers
+      protocol: TCP
+      port: 22000
+      targetPort: 22000
+    - name: quic-transfers
+      protocol: UDP
+      port: 22000
+      targetPort: 22000
+    - name: discovery
+      protocol: UDP
+      port: 21027
+      targetPort: 21027
+
+---
+kind: Ingress
+apiVersion: networking.k8s.io/v1
+metadata:
+  name: syncthing-private
+  namespace: tools
+  labels:
+    app: syncthing
+spec:
+  ingressClassName: nginx-private
+  rules:
+    - host: syncthing.k8s.lan
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: syncthing
+                port:
+                  number: 8384
